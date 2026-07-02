@@ -12,7 +12,7 @@
     "@tanstack/react-query": "^5.55.3",
     "ethers": "^6.13.4",
     "genlayer-js": "^1.1.8",
-    "next": "^16.2.4",
+    "next": "^16.2.10",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "viem": "2.38.0",
@@ -21,7 +21,7 @@
   "devDependencies": {
     "@types/node": "^24.12.2",
     "@types/react": "^19.2.14",
-    "eslint-config-next": "^16.2.4",
+    "eslint-config-next": "^16.2.10",
     "typescript": "5.9.3"
   }
 }

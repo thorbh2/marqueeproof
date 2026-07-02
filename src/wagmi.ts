@@ -1,5 +1,6 @@
-import { getDefaultConfig } from '@rainbow-me/rainbowkit';
 import { defineChain } from 'viem';
+import { createConfig, http } from 'wagmi';
+import { injected } from 'wagmi/connectors';
 
 const rpcUrl = process.env.NEXT_PUBLIC_GENLAYER_RPC || 'https://studio.genlayer.com/api';
 const explorerUrl = process.env.NEXT_PUBLIC_GENLAYER_EXPLORER || 'https://explorer-studio.genlayer.com';
@@ -14,9 +15,9 @@ export const studionet = defineChain({
   testnet: true,
 });
 
-export const config = getDefaultConfig({
-  appName: 'MarqueeProof',
-  projectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || 'marqueeproof-local-dev',
+export const config = createConfig({
   chains: [studionet],
+  connectors: [injected({ shimDisconnect: true })],
+  transports: { [studionet.id]: http(rpcUrl) },
   ssr: true,
 });

@@ -5,7 +5,7 @@ MarqueeProof is a RainbowKit + GenLayer Studionet project for event, venue and t
 ## Contract
 
 - Address: `0x1CcD5faA14261bF5290C2fC97ef972f0f9DE0d3d`
-- Explorer: <https://explorer-studio.genlayer.com/contracts/0x1CcD5faA14261bF5290C2fC97ef972f0f9DE0d3d>
+- Explorer: <https://explorer-studio.genlayer.com/address/0x1CcD5faA14261bF5290C2fC97ef972f0f9DE0d3d>
 - Deploy tx: <https://explorer-studio.genlayer.com/tx/0x2d64112842168cdb932d69338010e37c31186ff0e4e801553c7a9c65277ae78c>
 
 ## Contract Surface

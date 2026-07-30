@@ -2,6 +2,67 @@ import { createAccount, createClient } from 'genlayer-js';
 import { studionet as genlayerStudionet } from 'genlayer-js/chains';
 import { TransactionStatus, type TransactionHash } from 'genlayer-js/types';
 
+const GENLAYER_READ_RPC = typeof window === 'undefined'
+  ? 'https://studio.genlayer.com/api'
+  : `${window.location.origin}/api/genlayer`;
+const genLayerReadChain = {
+  ...genlayerStudionet,
+  rpcUrls: {
+    ...genlayerStudionet.rpcUrls,
+    default: { http: [GENLAYER_READ_RPC] },
+  },
+};
+
+type GenLayerWalletProvider = {
+  request: (request: { method: string; params?: unknown[] | Record<string, unknown> }) => Promise<unknown>;
+};
+
+function requireGenLayerWalletProvider(): GenLayerWalletProvider {
+  const provider = typeof window === 'undefined'
+    ? undefined
+    : (window as unknown as { ethereum?: GenLayerWalletProvider }).ethereum;
+  if (!provider) throw new Error('No injected wallet is available. Connect MetaMask through RainbowKit.');
+  return provider;
+}
+
+async function ensureGenLayerStudionet(provider: GenLayerWalletProvider) {
+  const chainId = '0xf22f';
+  try {
+    await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId }] });
+  } catch (error) {
+    const candidate = error as { code?: number; message?: string };
+    if (candidate.code !== 4902 && !/unrecognized chain|unknown chain/i.test(candidate.message || '')) throw error;
+    await provider.request({
+      method: 'wallet_addEthereumChain',
+      params: [{
+        chainId,
+        chainName: 'GenLayer Studionet',
+        nativeCurrency: { name: 'GEN', symbol: 'GEN', decimals: 18 },
+        rpcUrls: ['https://studio.genlayer.com/api'],
+        blockExplorerUrls: ['https://explorer-studio.genlayer.com'],
+      }],
+    });
+    await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId }] });
+  }
+}
+
+function withGenLayerStudioFees(provider: GenLayerWalletProvider): GenLayerWalletProvider {
+  return {
+    request: async (request) => {
+      if (request.method !== 'eth_sendTransaction' || !Array.isArray(request.params) || !request.params[0]) {
+        return provider.request(request);
+      }
+      const transaction = { ...(request.params[0] as Record<string, unknown>) };
+      transaction.type = '0x0';
+      transaction.gasPrice = '0x0';
+      if (!transaction.gas) transaction.gas = '0x100000';
+      delete transaction.maxFeePerGas;
+      delete transaction.maxPriorityFeePerGas;
+      return provider.request({ ...request, params: [transaction] });
+    },
+  };
+}
+
 export const CONTRACT_ADDRESS =
   (process.env.NEXT_PUBLIC_CONTRACT_ADDRESS || '0x1CcD5faA14261bF5290C2fC97ef972f0f9DE0d3d').trim();
 export const EXPLORER = process.env.NEXT_PUBLIC_GENLAYER_EXPLORER || 'https://explorer-studio.genlayer.com';
@@ -48,7 +109,7 @@ export function explorerTx(hash: string): string {
 }
 
 export function explorerContract(): string {
-  return `${EXPLORER}/contracts/${CONTRACT_ADDRESS}`;
+  return `${EXPLORER}/address/${CONTRACT_ADDRESS}`;
 }
 
 export function shortHex(value: string, front = 6, back = 4): string {
@@ -67,7 +128,7 @@ function parseObj<T>(raw: unknown, fallback: T): T {
 
 let readClient: ReturnType<typeof createClient> | null = null;
 function reader() {
-  if (!readClient) readClient = createClient({ chain: genlayerStudionet, account: createAccount() });
+  if (!readClient) readClient = createClient({ chain: genLayerReadChain, account: createAccount() });
   return readClient;
 }
 
@@ -96,8 +157,13 @@ export async function writeMethod(
   args: unknown[],
 ): Promise<`0x${string}`> {
   if (!hasContract()) throw new Error('contract_not_deployed');
-  const client = createClient({ chain: genlayerStudionet, account: connectedAddress });
-  await client.connect(NETWORK as never);
+  const provider = requireGenLayerWalletProvider();
+  await ensureGenLayerStudionet(provider);
+  const client = createClient({
+    chain: genlayerStudionet,
+    account: connectedAddress,
+    provider: withGenLayerStudioFees(provider) as never,
+  });
   return client.writeContract({
     address: CONTRACT_ADDRESS as `0x${string}`,
     functionName,
@@ -107,7 +173,7 @@ export async function writeMethod(
 }
 
 export async function waitAccepted(connectedAddress: `0x${string}`, hash: `0x${string}`): Promise<void> {
-  const client = createClient({ chain: genlayerStudionet, account: connectedAddress });
+  const client = createClient({ chain: genLayerReadChain, account: createAccount() });
   await client.waitForTransactionReceipt({
     hash: hash as unknown as TransactionHash,
     status: TransactionStatus.ACCEPTED,
@@ -116,8 +182,29 @@ export async function waitAccepted(connectedAddress: `0x${string}`, hash: `0x${s
   });
 }
 
-export function friendlyError(error: unknown): string {
-  const text = error instanceof Error ? error.message : String(error);
+export function formatError(error: unknown): string {
+  if (typeof error === 'string') return error.trim() || 'Transaction failed.';
+  const seen = new Set<unknown>();
+  const messages: string[] = [];
+  const visit = (value: unknown, depth = 0) => {
+    if (!value || depth > 3 || seen.has(value)) return;
+    if (typeof value === 'string') {
+      const clean = value.replace(/^execution reverted:?\s*/i, '').trim();
+      if (clean && !messages.includes(clean)) messages.push(clean);
+      return;
+    }
+    if (typeof value !== 'object') return;
+    seen.add(value);
+    const row = value as Record<string, unknown>;
+    for (const key of ['shortMessage', 'reason', 'details', 'message']) visit(row[key], depth + 1);
+    for (const key of ['cause', 'data', 'error']) visit(row[key], depth + 1);
+  };
+  visit(error);
+  let text = messages.join(' / ');
+  if (!text) {
+    try { text = JSON.stringify(error); } catch { text = ''; }
+  }
+  if (!text || text === '{}') text = 'Transaction failed. Check the wallet activity and retry.';
   const lower = text.toLowerCase();
   if (lower.includes('execution slots') || lower.includes('server busy') || lower.includes('busy')) {
     return 'Studionet is busy. Wait a moment and retry.';
@@ -127,3 +214,5 @@ export function friendlyError(error: unknown): string {
   }
   return text;
 }
+
+export const friendlyError = formatError;

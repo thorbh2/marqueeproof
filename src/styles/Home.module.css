@@ -120,6 +120,13 @@
   gap: 12px;
 }
 
+.emptyTicket {
+  padding: 14px;
+  border: 2px dashed #76522c;
+  color: #d3b86f;
+  line-height: 1.45;
+}
+
 .ticket {
   min-height: 118px;
   padding: 13px;
@@ -325,6 +332,33 @@
   gap: 9px;
 }
 
+.showForm,
+.lifecycleInputs {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #5a3a1d;
+}
+
+.lifecycleInputs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+.showForm input,
+.showForm textarea,
+.lifecycleInputs input {
+  min-width: 0;
+  min-height: 42px;
+  border: 2px solid #5a3a1d;
+  background: #0f0d0a;
+  color: #fff7df;
+  padding: 9px 10px;
+  font: 700 12px/1.35 "Courier New", monospace;
+}
+
+.showForm textarea { resize: vertical; min-height: 72px; }
+.showForm .actionKey { min-height: 42px; }
+
 .actionKey {
   min-height: 58px;
   padding: 8px;
@@ -485,6 +519,9 @@
   .actionBoard {
     grid-template-columns: 1fr;
   }
+
+  .showForm,
+  .lifecycleInputs { grid-template-columns: 1fr; }
 
   .metrics div,
   .metrics div:nth-child(2n),

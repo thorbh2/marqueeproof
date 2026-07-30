@@ -110,7 +110,11 @@ def _ruling(raw) -> dict:
     reason = _s(data.get("reason", data.get("rationale", "")), 900)
     if reason == "":
         reason = "Marquee filing ruling: " + ruling
-    return {"ruling": ruling, "confidenceDeltaBps": delta, "reason": reason, "riskFlags": _flags(data.get("riskFlags", []))}
+    revised = _s(data.get("revisedVerdict", data.get("verdict", "unverified")), 40).lower()
+    if revised not in VERDICTS or revised == "pending":
+        revised = "unverified"
+    return {"ruling": ruling, "revisedVerdict": revised, "confidenceDeltaBps": delta,
+            "reason": reason, "riskFlags": _flags(data.get("riskFlags", []))}
 
 
 SECURITY = (
@@ -137,7 +141,8 @@ def _filing_prompt(kind: str, show: dict, filing: dict, source_text: str) -> str
         "\nShow JSON: " + json.dumps(show, sort_keys=True) +
         "\nFiling JSON: " + json.dumps(filing, sort_keys=True) +
         "\nRendered filing source:\n" + source_text +
-        "\nReply ONLY JSON with keys: ruling ('upheld','retuned','rejected','inconclusive'), confidenceDeltaBps, reason, riskFlags array."
+        "\nReply ONLY JSON with keys: ruling ('upheld','retuned','rejected','inconclusive'), "
+        "revisedVerdict ('authentic','mixed','unverified','rejected'), confidenceDeltaBps, reason, riskFlags array."
     )
 
 
@@ -160,16 +165,43 @@ class MarqueeProof(gl.Contract):
     idx_show_challenges: TreeMap[str, str]
     idx_show_appeals: TreeMap[str, str]
     idx_show_audits: TreeMap[str, str]
+    used_ticket_refs: TreeMap[str, str]
     recent_ids: DynArray[str]
+    admin: str
     house_policy: str
     clock: u256
 
     def __init__(self) -> None:
         self.clock = 0
+        self.admin = gl.message.sender_address.as_hex
         self.house_policy = "MarqueeProof requires public official pages, venue proof, ticket-batch accounting, check-in sampling, prompt-injection resistance, challenges, appeals and audit trails."
 
     def _actor(self) -> str:
         return gl.message.sender_address.as_hex
+
+    def _require_admin(self) -> None:
+        if self._actor().lower() != self.admin.lower():
+            raise Exception("admin_only")
+
+    def _require_operator(self, show: dict) -> None:
+        actor = self._actor().lower()
+        if actor != self.admin.lower() and actor != show["actor"].lower():
+            raise Exception("show_operator_only")
+
+    def _has_open_filings(self, show: dict) -> bool:
+        ids = show.get("challengeIds", [])
+        i = 0
+        while i < len(ids):
+            if json.loads(self.challenges[int(ids[i])]).get("ruling", "pending") == "pending":
+                return True
+            i += 1
+        ids = show.get("appealIds", [])
+        i = 0
+        while i < len(ids):
+            if json.loads(self.appeals[int(ids[i])]).get("ruling", "pending") == "pending":
+                return True
+            i += 1
+        return False
 
     def _ilist(self, tree: TreeMap[str, str], key: str) -> list:
         if key not in tree:
@@ -285,7 +317,11 @@ class MarqueeProof(gl.Contract):
 
     @gl.public.write
     def set_house_policy(self, policy: str) -> None:
-        self.house_policy = _s(policy, 1400)
+        self._require_admin()
+        value = _s(policy, 1400)
+        if value == "":
+            raise Exception("empty_policy")
+        self.house_policy = value
 
     @gl.public.write
     def open_show(self, title: str, venue: str, show_date: str, claim: str, official_url: str) -> int:
@@ -311,6 +347,9 @@ class MarqueeProof(gl.Contract):
     def add_venue_proof(self, show_id: str, label: str, url: str, note: str) -> str:
         self.clock += 1
         show = self._load_show(show_id)
+        self._require_operator(show)
+        if show["status"] in ("SETTLED", "ARCHIVED"):
+            raise Exception("show_closed")
         pid = str(len(self.venue_proofs))
         row = {"id": pid, "showId": show["id"], "actor": self._actor(), "label": _s(label, 180),
                "url": _url(url), "note": _s(note, 760), "createdAt": str(int(self.clock))}
@@ -329,6 +368,9 @@ class MarqueeProof(gl.Contract):
     def mint_ticket_batch(self, show_id: str, tier: str, quantity: int, face_value_cents: int, sale_url: str) -> str:
         self.clock += 1
         show = self._load_show(show_id)
+        self._require_operator(show)
+        if show["status"] in ("SETTLED", "ARCHIVED"):
+            raise Exception("show_closed")
         qty = _bounded(quantity, 1, 1000000, 1)
         price = _bounded(face_value_cents, 0, 100000000, 0)
         bid = str(len(self.ticket_batches))
@@ -350,11 +392,24 @@ class MarqueeProof(gl.Contract):
     def check_in_ticket(self, show_id: str, batch_id: str, ticket_ref: str, holder_note: str) -> str:
         self.clock += 1
         show = self._load_show(show_id)
+        self._require_operator(show)
+        if show["status"] in ("SETTLED", "ARCHIVED"):
+            raise Exception("show_closed")
         if int(batch_id) < 0 or int(batch_id) >= len(self.ticket_batches):
             raise Exception("batch_not_found")
+        batch = json.loads(self.ticket_batches[int(batch_id)])
+        if batch.get("showId") != show["id"]:
+            raise Exception("batch_show_mismatch")
+        ref = _s(ticket_ref, 180)
+        if ref == "":
+            raise Exception("empty_ticket_ref")
+        replay_key = show["id"] + ":" + batch_id + ":" + ref.lower()
+        if replay_key in self.used_ticket_refs:
+            raise Exception("ticket_already_checked_in")
+        self.used_ticket_refs[replay_key] = "1"
         cid = str(len(self.checkins))
         row = {"id": cid, "showId": show["id"], "batchId": _s(batch_id, 40), "actor": self._actor(),
-               "ticketRef": _s(ticket_ref, 180), "holderNote": _s(holder_note, 520), "createdAt": str(int(self.clock))}
+               "ticketRef": ref, "holderNote": _s(holder_note, 520), "createdAt": str(int(self.clock))}
         self.checkins.append(json.dumps(row))
         show["checkinIds"].append(cid)
         show["ticketsChecked"] = int(show.get("ticketsChecked", 0)) + 1
@@ -368,6 +423,7 @@ class MarqueeProof(gl.Contract):
     def open_audit(self, show_id: str) -> None:
         self.clock += 1
         show = self._load_show(show_id)
+        self._require_operator(show)
         if len(show.get("proofIds", [])) == 0 or len(show.get("batchIds", [])) == 0:
             raise Exception("missing_proof_or_batch")
         before = show["status"]
@@ -379,29 +435,25 @@ class MarqueeProof(gl.Contract):
     def audit_show_with_genlayer(self, show_id: str) -> str:
         self.clock += 1
         show = self._load_show(show_id)
+        self._require_operator(show)
+        if self._has_open_filings(show):
+            raise Exception("open_filing")
+        if len(show.get("proofIds", [])) == 0 or len(show.get("batchIds", [])) == 0:
+            raise Exception("missing_proof_or_batch")
+        if show["status"] in ("SETTLED", "ARCHIVED"):
+            raise Exception("show_closed")
         before = show["status"]
         self._set_status(show, "INSPECTING")
         public_show = self._public_show(show)
-        compact_show = {"title": public_show["title"], "venue": public_show["venue"], "showDate": public_show["showDate"],
-                        "claim": public_show["claim"], "proofCount": len(show.get("proofIds", [])),
-                        "batchCount": len(show.get("batchIds", [])), "ticketsIssued": public_show["ticketsIssued"],
-                        "ticketsChecked": public_show["ticketsChecked"]}
-        source = self._render(show["officialUrl"], 260)
-        try:
-            raw = gl.nondet.exec_prompt(
-                "MarqueeProof event audit. " + SECURITY +
-                "\nPolicy: " + self.house_policy[:420] +
-                "\nShow: " + json.dumps(compact_show, sort_keys=True) +
-                "\nOfficial page excerpt: " + source[:420] +
-                "\nReturn only JSON: verdict, confidenceBps, venueMatchBps, ticketRiskBps, summary, rationale, riskFlags.",
-                response_format="json"
-            )
-            res = _inspection(raw)
-        except Exception:
-            res = _inspection({"verdict": "unverified", "confidenceBps": 5200, "venueMatchBps": 5000, "ticketRiskBps": 4500,
-                               "summary": "GenLayer inspection attempted; fallback stored because nondeterministic execution was unavailable.",
-                               "rationale": "The contract stores a conservative inspection row rather than finalize without public evidence state.",
-                               "riskFlags": ["GENLAYER_FALLBACK"]})
+        bundle = self._source_bundle(show)
+        policy = self.house_policy
+        def leader() -> str:
+            raw = gl.nondet.exec_prompt(_inspection_prompt(policy, public_show, bundle), response_format="json")
+            return json.dumps(_inspection(raw))
+        res = json.loads(gl.eq_principle.prompt_comparative(
+            leader,
+            "Equal if verdict matches and confidence, venue match and ticket risk are each within 1500 basis points."
+        ))
         iid = str(len(self.inspections))
         row = {"id": iid, "showId": show["id"], "actor": self._actor(), "verdict": res["verdict"],
                "confidenceBps": res["confidenceBps"], "venueMatchBps": res["venueMatchBps"], "ticketRiskBps": res["ticketRiskBps"],
@@ -428,6 +480,7 @@ class MarqueeProof(gl.Contract):
     def open_challenge_window(self, show_id: str) -> None:
         self.clock += 1
         show = self._load_show(show_id)
+        self._require_operator(show)
         before = show["status"]
         if len(show.get("inspectionIds", [])) == 0:
             raise Exception("not_inspected")
@@ -439,6 +492,8 @@ class MarqueeProof(gl.Contract):
     def file_challenge(self, show_id: str, reason: str, proof_url: str) -> str:
         self.clock += 1
         show = self._load_show(show_id)
+        if show["status"] != "CHALLENGED":
+            raise Exception("challenge_window_closed")
         cid = str(len(self.challenges))
         row = {"id": cid, "showId": show["id"], "actor": self._actor(), "reason": _s(reason, 900),
                "proofUrl": _url(proof_url), "ruling": "pending", "confidenceDeltaBps": 0, "decisionReason": "",
@@ -457,36 +512,49 @@ class MarqueeProof(gl.Contract):
     def resolve_challenge_with_genlayer(self, show_id: str, challenge_id: str) -> None:
         self.clock += 1
         show = self._load_show(show_id)
+        self._require_operator(show)
+        if int(challenge_id) < 0 or int(challenge_id) >= len(self.challenges):
+            raise Exception("challenge_not_found")
         challenge = json.loads(self.challenges[int(challenge_id)])
+        if challenge.get("showId") != show["id"]:
+            raise Exception("challenge_show_mismatch")
+        if challenge.get("ruling", "pending") != "pending":
+            raise Exception("challenge_already_resolved")
         text = self._render(challenge["proofUrl"], 260)
-        try:
+        def leader() -> str:
             raw = gl.nondet.exec_prompt(
-                "Resolve MarqueeProof challenge. " + SECURITY +
-                "\nShow: " + json.dumps(self._public_show(show), sort_keys=True)[:620] +
-                "\nChallenge: " + json.dumps(challenge, sort_keys=True)[:620] +
-                "\nSource excerpt: " + text[:360] +
-                "\nReturn only JSON: ruling, confidenceDeltaBps, reason, riskFlags.",
-                response_format="json"
+                _filing_prompt("challenge", self._public_show(show), challenge, text), response_format="json"
             )
-            res = _ruling(raw)
-        except Exception:
-            res = _ruling({"ruling": "inconclusive", "confidenceDeltaBps": 0, "reason": "GenLayer challenge resolver attempted; fallback stored.", "riskFlags": ["GENLAYER_FALLBACK"]})
+            return json.dumps(_ruling(raw))
+        res = json.loads(gl.eq_principle.prompt_comparative(
+            leader,
+            "Equal if ruling and revised verdict match and confidence delta is within 1200 basis points."
+        ))
         challenge["ruling"] = res["ruling"]
         challenge["confidenceDeltaBps"] = res["confidenceDeltaBps"]
         challenge["decisionReason"] = res["reason"]
         challenge["riskFlags"] = res["riskFlags"]
         self.challenges[int(challenge_id)] = json.dumps(challenge)
         if res["ruling"] in ("upheld", "retuned"):
+            show["verdict"] = res["revisedVerdict"]
             show["confidenceBps"] = max(0, min(10000, int(show["confidenceBps"]) + int(res["confidenceDeltaBps"])))
             show["riskFlags"] = show.get("riskFlags", []) + ["CHALLENGE_" + res["ruling"].upper()]
             self._rep(challenge["actor"], "successfulFilings", 130)
         self._audit(show, "resolve_challenge", res["reason"], show["status"], show["status"])
+        if not self._has_open_filings(show):
+            self._set_status(show, "VERIFIED" if show["verdict"] == "authentic" else "PROOFED")
         self._store_show(show)
 
     @gl.public.write
     def file_appeal(self, show_id: str, reason: str, proof_url: str) -> str:
         self.clock += 1
         show = self._load_show(show_id)
+        if len(show.get("challengeIds", [])) == 0:
+            raise Exception("challenge_required")
+        if self._has_open_filings(show):
+            raise Exception("open_filing")
+        if show["status"] not in ("VERIFIED", "PROOFED", "CHALLENGED", "APPEALED"):
+            raise Exception("appeal_window_closed")
         aid = str(len(self.appeals))
         row = {"id": aid, "showId": show["id"], "actor": self._actor(), "reason": _s(reason, 900),
                "proofUrl": _url(proof_url), "ruling": "pending", "confidenceDeltaBps": 0, "decisionReason": "",
@@ -505,36 +573,53 @@ class MarqueeProof(gl.Contract):
     def resolve_appeal_with_genlayer(self, show_id: str, appeal_id: str) -> None:
         self.clock += 1
         show = self._load_show(show_id)
+        self._require_operator(show)
+        if int(appeal_id) < 0 or int(appeal_id) >= len(self.appeals):
+            raise Exception("appeal_not_found")
         appeal = json.loads(self.appeals[int(appeal_id)])
+        if appeal.get("showId") != show["id"]:
+            raise Exception("appeal_show_mismatch")
+        if appeal.get("ruling", "pending") != "pending":
+            raise Exception("appeal_already_resolved")
         text = self._render(appeal["proofUrl"], 260)
-        try:
+        def leader() -> str:
             raw = gl.nondet.exec_prompt(
-                "Resolve MarqueeProof appeal. " + SECURITY +
-                "\nShow: " + json.dumps(self._public_show(show), sort_keys=True)[:620] +
-                "\nAppeal: " + json.dumps(appeal, sort_keys=True)[:620] +
-                "\nSource excerpt: " + text[:360] +
-                "\nReturn only JSON: ruling, confidenceDeltaBps, reason, riskFlags.",
-                response_format="json"
+                _filing_prompt("appeal", self._public_show(show), appeal, text), response_format="json"
             )
-            res = _ruling(raw)
-        except Exception:
-            res = _ruling({"ruling": "inconclusive", "confidenceDeltaBps": 0, "reason": "GenLayer appeal resolver attempted; fallback stored.", "riskFlags": ["GENLAYER_FALLBACK"]})
+            return json.dumps(_ruling(raw))
+        res = json.loads(gl.eq_principle.prompt_comparative(
+            leader,
+            "Equal if ruling and revised verdict match and confidence delta is within 1200 basis points."
+        ))
         appeal["ruling"] = res["ruling"]
         appeal["confidenceDeltaBps"] = res["confidenceDeltaBps"]
         appeal["decisionReason"] = res["reason"]
         appeal["riskFlags"] = res["riskFlags"]
         self.appeals[int(appeal_id)] = json.dumps(appeal)
-        show["confidenceBps"] = max(0, min(10000, int(show["confidenceBps"]) + int(res["confidenceDeltaBps"])))
+        if res["ruling"] in ("upheld", "retuned"):
+            show["verdict"] = res["revisedVerdict"]
+            show["confidenceBps"] = max(0, min(10000, int(show["confidenceBps"]) + int(res["confidenceDeltaBps"])))
+            show["riskFlags"] = show.get("riskFlags", []) + ["APPEAL_" + res["ruling"].upper()]
+            self._rep(appeal["actor"], "successfulFilings", 150)
         self._audit(show, "resolve_appeal", res["reason"], show["status"], show["status"])
+        if not self._has_open_filings(show):
+            self._set_status(show, "VERIFIED" if show["verdict"] == "authentic" else "PROOFED")
         self._store_show(show)
 
     @gl.public.write
     def settle_show(self, show_id: str) -> None:
         self.clock += 1
         show = self._load_show(show_id)
+        self._require_operator(show)
         before = show["status"]
         if len(show.get("inspectionIds", [])) == 0:
             raise Exception("not_inspected")
+        if self._has_open_filings(show):
+            raise Exception("open_filing")
+        if show.get("verdict", "pending") == "pending":
+            raise Exception("verdict_pending")
+        if show["status"] in ("SETTLED", "ARCHIVED"):
+            raise Exception("show_closed")
         self._set_status(show, "SETTLED")
         self._audit(show, "settle_show", "show settled into public marquee ledger", before, "SETTLED")
         self._store_show(show)
@@ -543,6 +628,9 @@ class MarqueeProof(gl.Contract):
     def archive_show(self, show_id: str) -> None:
         self.clock += 1
         show = self._load_show(show_id)
+        self._require_operator(show)
+        if show["status"] != "SETTLED":
+            raise Exception("not_settled")
         before = show["status"]
         self._set_status(show, "ARCHIVED")
         self._audit(show, "archive_show", "show archived", before, "ARCHIVED")
@@ -657,6 +745,10 @@ class MarqueeProof(gl.Contract):
         return json.dumps({"contract": "MarqueeProof", "statuses": list(STATUSES), "verdicts": list(VERDICTS),
                            "recentShows": json.loads(self.get_recent_shows(12)), "stats": json.loads(self.get_contract_stats()),
                            "quality": json.loads(self.get_quality_score())})
+
+    @gl.public.view
+    def get_admin(self) -> str:
+        return self.admin
 
     @gl.public.view
     def get_stats(self) -> dict:

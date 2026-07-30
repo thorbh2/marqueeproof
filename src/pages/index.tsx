@@ -20,47 +20,12 @@ import {
   writeMethod,
 } from '../lib/marqueeproof';
 
-const DOCS = 'https://docs.genlayer.com/';
-const WEB = 'https://docs.genlayer.com/developers/intelligent-contracts/features/web-access';
-const SECURITY = 'https://docs.genlayer.com/developers/intelligent-contracts/security-and-best-practices/prompt-injection';
-const WHITEPAPER = 'https://www.genlayer.com/whitepaper';
-
-const fallbackShows: MarqueeShow[] = [
-  {
-    id: '0',
-    title: 'Glasshouse midnight premiere',
-    venue: 'Aster Hall',
-    showDate: '2026-07-18',
-    claim: 'Official event page, venue proof, ticket batch and door samples resolve to the same performance.',
-    officialUrl: DOCS,
-    status: 'SETTLED',
-    verdict: 'authentic',
-    confidenceBps: 9100,
-    venueMatchBps: 8800,
-    ticketRiskBps: 1400,
-    ticketsIssued: 620,
-    ticketsChecked: 44,
-    summary: 'Venue identity and ticket trail line up cleanly.',
-    riskFlags: ['LOW_TICKET_RISK'],
-  },
-  {
-    id: '1',
-    title: 'Rooftop matinee transfer',
-    venue: 'North Canopy',
-    showDate: '2026-08-03',
-    claim: 'Transfer listing is public, but settlement waits for a stronger venue-side proof.',
-    officialUrl: WEB,
-    status: 'CHALLENGED',
-    verdict: 'mixed',
-    confidenceBps: 6700,
-    venueMatchBps: 6100,
-    ticketRiskBps: 3900,
-    ticketsIssued: 240,
-    ticketsChecked: 17,
-    summary: 'Listing exists; ticket source needs cleaner reconciliation.',
-    riskFlags: ['TRANSFER_AMBIGUITY'],
-  },
-];
+const EMPTY_SHOW: MarqueeShow = {
+  id: '', title: 'No onchain shows', venue: 'Register a show from the wallet booth', showDate: '',
+  claim: 'The configured contract did not return any show records. Static fallback outcomes are disabled.',
+  officialUrl: '', status: 'EMPTY', verdict: 'not reviewed', confidenceBps: 0, venueMatchBps: 0,
+  ticketRiskBps: 0, ticketsIssued: 0, ticketsChecked: 0, summary: '', riskFlags: [],
+};
 
 const seats = Array.from({ length: 66 }, (_, index) => index);
 
@@ -71,24 +36,31 @@ const Home: NextPage = () => {
   const [selected, setSelected] = useState(0);
   const [toast, setToast] = useState<TxToast>({ kind: 'idle', title: '' });
   const [busy, setBusy] = useState(false);
+  const [readError, setReadError] = useState('');
+  const [showTitle, setShowTitle] = useState('');
+  const [showVenue, setShowVenue] = useState('');
+  const [showDate, setShowDate] = useState('');
+  const [showClaim, setShowClaim] = useState('');
+  const [proofUrl, setProofUrl] = useState('');
+  const [detail, setDetail] = useState('');
+  const [recordId, setRecordId] = useState('');
 
-  const shows = bootstrap?.recentShows?.length ? bootstrap.recentShows : fallbackShows;
-  const active = shows[Math.min(selected, shows.length - 1)] || fallbackShows[0];
-  const stats = bootstrap?.stats || {
-    shows: shows.length,
-    venueProofs: 6,
-    ticketBatches: 4,
-    checkins: 61,
-    inspections: 2,
-    challenges: 1,
-    appeals: 1,
-    audits: 19,
-  };
-  const quality = bootstrap?.quality?.qualityBps ?? 8450;
+  const shows = bootstrap?.recentShows ?? [];
+  const active = shows[Math.min(selected, Math.max(0, shows.length - 1))] ?? EMPTY_SHOW;
+  const hasActive = active.id !== '';
+  const stats = bootstrap?.stats ?? {};
+  const quality = bootstrap?.quality?.qualityBps ?? 0;
 
   const refresh = useCallback(async () => {
-    const data = await getBootstrap().catch(() => null);
-    setBootstrap(data);
+    try {
+      const data = await getBootstrap();
+      setBootstrap(data);
+      setSelected((value) => Math.min(value, Math.max(0, (data?.recentShows?.length ?? 1) - 1)));
+      setReadError(data ? '' : 'The configured contract did not return a bootstrap payload.');
+    } catch (error) {
+      setBootstrap(null);
+      setReadError(friendlyError(error));
+    }
   }, []);
 
   useEffect(() => {
@@ -97,7 +69,7 @@ const Home: NextPage = () => {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  const currentShowId = useMemo(() => String(active.id || '0'), [active.id]);
+  const currentShowId = useMemo(() => String(active.id), [active.id]);
 
   const run = useCallback(
     async (label: string, functionName: string, args: unknown[]) => {
@@ -134,24 +106,30 @@ const Home: NextPage = () => {
     [address, chainId, isConnected, refresh, switchChainAsync],
   );
 
+  const proofReady = /^https?:\/\//i.test(proofUrl.trim());
+  const filingReady = detail.trim().length >= 8 && proofReady;
+  const idReady = /^\d+$/.test(recordId.trim());
   const actions = [
-    {
-      label: 'Open show',
-      fn: 'open_show',
-      args: [
-        'Glasshouse midnight premiere',
-        'Aster Hall',
-        '2026-07-18',
-        'Official event page, venue proof and ticket batch should resolve to the same performance.',
-        DOCS,
-      ],
-    },
-    { label: 'Add venue proof', fn: 'add_venue_proof', args: [currentShowId, 'official venue note', DOCS, 'Public venue source linked to the show listing.'] },
-    { label: 'Mint ticket batch', fn: 'mint_ticket_batch', args: [currentShowId, 'balcony-first-wave', 620, 4500, WEB] },
-    { label: 'Check in ticket', fn: 'check_in_ticket', args: [currentShowId, '0', `MP-${Date.now().toString().slice(-6)}`, 'Door sample from connected wallet session.'] },
-    { label: 'Open audit', fn: 'open_audit', args: [currentShowId] },
-    { label: 'AI audit', fn: 'audit_show_with_genlayer', args: [currentShowId] },
+    { label: 'Add venue proof', fn: 'add_venue_proof', args: [currentShowId, detail || 'Venue proof', proofUrl, detail], enabled: hasActive && filingReady },
+    { label: 'Mint ticket batch', fn: 'mint_ticket_batch', args: [currentShowId, detail || 'general admission', 100, 2500, proofUrl], enabled: hasActive && proofReady },
+    { label: 'Check in ticket', fn: 'check_in_ticket', args: [currentShowId, recordId, `MP-${Date.now().toString().slice(-6)}`, detail || 'Door check-in'], enabled: hasActive && idReady },
+    { label: 'Open audit', fn: 'open_audit', args: [currentShowId], enabled: hasActive },
+    { label: 'AI audit', fn: 'audit_show_with_genlayer', args: [currentShowId], enabled: hasActive },
+    { label: 'Open challenge window', fn: 'open_challenge_window', args: [currentShowId], enabled: hasActive },
+    { label: 'File challenge', fn: 'file_challenge', args: [currentShowId, detail, proofUrl], enabled: hasActive && filingReady },
+    { label: 'Resolve challenge', fn: 'resolve_challenge_with_genlayer', args: [currentShowId, recordId], enabled: hasActive && idReady },
+    { label: 'File appeal', fn: 'file_appeal', args: [currentShowId, detail, proofUrl], enabled: hasActive && filingReady },
+    { label: 'Resolve appeal', fn: 'resolve_appeal_with_genlayer', args: [currentShowId, recordId], enabled: hasActive && idReady },
+    { label: 'Settle show', fn: 'settle_show', args: [currentShowId], enabled: hasActive },
   ];
+
+  const openShow = () => {
+    if (!showTitle.trim() || !showVenue.trim() || !showDate.trim() || showClaim.trim().length < 8 || !proofReady) {
+      setToast({ kind: 'error', title: 'Show form is incomplete', detail: 'Add title, venue, date, claim and a public http(s) source.' });
+      return;
+    }
+    run('Open show', 'open_show', [showTitle.trim(), showVenue.trim(), showDate.trim(), showClaim.trim(), proofUrl.trim()]);
+  };
 
   return (
     <div className={styles.shell}>
@@ -188,6 +166,7 @@ const Home: NextPage = () => {
 
         <section className={styles.ticketRail}>
           <div className={styles.railLabel}>Live tickets</div>
+          {shows.length === 0 && <div className={styles.emptyTicket}>No show records returned by the configured contract.</div>}
           {shows.map((show, index) => (
             <button
               key={`${show.id}-${show.title}`}
@@ -241,11 +220,23 @@ const Home: NextPage = () => {
             <div><span>Issued</span><b>{active.ticketsIssued}</b></div>
           </div>
           <div className={styles.actionBoard}>
+            <div className={styles.showForm}>
+              <input value={showTitle} onChange={(event) => setShowTitle(event.target.value)} placeholder="Show title" />
+              <input value={showVenue} onChange={(event) => setShowVenue(event.target.value)} placeholder="Venue" />
+              <input value={showDate} onChange={(event) => setShowDate(event.target.value)} placeholder="Show date" />
+              <textarea value={showClaim} onChange={(event) => setShowClaim(event.target.value)} placeholder="Claim checked against public evidence" />
+              <button className={styles.actionKey} disabled={busy || !isConnected} onClick={openShow} type="button">Open show</button>
+            </div>
+            <div className={styles.lifecycleInputs}>
+              <input value={detail} onChange={(event) => setDetail(event.target.value)} placeholder="Proof note, challenge or appeal reason" />
+              <input value={proofUrl} onChange={(event) => setProofUrl(event.target.value)} placeholder="https:// public proof" />
+              <input value={recordId} onChange={(event) => setRecordId(event.target.value.replace(/\D/g, ''))} placeholder="Batch / challenge / appeal ID" inputMode="numeric" />
+            </div>
             {actions.map((action) => (
               <button
                 key={action.fn}
                 className={styles.actionKey}
-                disabled={busy || !isConnected}
+                disabled={busy || !isConnected || !action.enabled}
                 onClick={() => run(action.label, action.fn, action.args)}
                 type="button"
               >
@@ -260,6 +251,7 @@ const Home: NextPage = () => {
               {toast.hash && <a href={explorerTx(toast.hash)} target="_blank" rel="noreferrer">{shortHex(toast.hash, 10, 8)}</a>}
             </div>
           )}
+          {readError && <div className={`${styles.toast} ${styles.toast_error}`}><strong>Contract read failed</strong><span>{readError}</span></div>}
         </section>
 
         <section className={styles.ledger}>

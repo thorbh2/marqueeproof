@@ -40,7 +40,7 @@ npm run build
 ## Public Release
 
 - Repository: <https://github.com/aspro45/marqueeproof>
-- Live app: <https://tanawo3-marqueeproof.vercel.app>
+- Live app: <https://marqueeproof-boxoffice.vercel.app>
 - Framework: Next.js with RainbowKit
 - Build: `npm run build`
 
